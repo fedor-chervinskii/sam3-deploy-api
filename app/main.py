@@ -2,6 +2,7 @@
 
 import base64
 import io
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -11,14 +12,25 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from PIL import Image
 
 from app.models import SAM3Request, SAM3Response, ImageData
 from sam3 import build_sam3_image_model
 from sam3.model.sam3_image_processor import Sam3Processor
 
-# Load environment variables from .env file
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    force=True  # Override existing configuration
+)
+logger = logging.getLogger(__name__)
+# Also set uvicorn's loggers to show our logs
+logging.getLogger("uvicorn").setLevel(logging.INFO)
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+
 from dotenv import load_dotenv
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
@@ -56,7 +68,7 @@ def load_model():
     from huggingface_hub import login
     try:
         login(token=hf_token, add_to_git_credential=False)
-        print("Successfully authenticated with HuggingFace")
+        logger.info("Successfully authenticated with HuggingFace")
     except Exception as e:
         raise RuntimeError(f"HuggingFace authentication failed: {e}")
     
@@ -79,9 +91,9 @@ def load_model():
 async def lifespan(app: FastAPI):
     """Lifespan context manager for model loading."""
     # Startup: load model
-    print("Loading SAM3 model...")
+    logger.info("Loading SAM3 model...")
     model_state["model"] = load_model()
-    print("SAM3 model loaded successfully!")
+    logger.info("SAM3 model loaded successfully!")
     yield
     # Shutdown: cleanup
     model_state.clear()
@@ -94,6 +106,30 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle request validation errors with sanitized logging."""
+    body = await request.body()
+    try:
+        body_json = body.decode('utf-8')
+        import json
+        body_dict = json.loads(body_json)
+        # Truncate base64 fields for logging
+        sanitized = {k: f"<base64 {len(v)} chars>" if k == "image" and len(str(v)) > 100 else v 
+                    for k, v in body_dict.items()}
+        logger.error(f"Validation error on {request.method} {request.url.path}")
+        logger.error(f"Validation errors: {exc.errors()}")
+        logger.error(f"Request payload: {json.dumps(sanitized, indent=2)}")
+    except:
+        logger.error(f"Validation error on {request.method} {request.url.path}")
+        logger.error(f"Validation errors: {exc.errors()}")
+    
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()}
+    )
 
 
 def decode_base64_image(base64_string: str) -> Image.Image:
@@ -162,117 +198,139 @@ async def segment_image(request: SAM3Request):
     - Visual prompts: Provide bounding boxes as examples
     - Multiple results: Use 'n' parameter to get multiple mask variations
     """
-    # Validate that at least one prompt is provided
+    start_time = time.time()
+    
+    logger.info("=== Received POST /sam3 request ===")
+    logger.info(f"Request has prompt: {bool(request.prompt)}")
+    logger.info(f"Request has boxes: {bool(request.boxes)}")
+    if request.prompt:
+        logger.info(f"Text prompt: {request.prompt}")
+    if request.boxes:
+        logger.info(f"Number of boxes: {len(request.boxes)}")
+    
     if not request.prompt and not request.boxes:
+        logger.error("No prompt or boxes provided")
         raise HTTPException(
             status_code=400,
             detail="At least one of 'prompt' (text) or 'boxes' (visual prompts) must be provided"
         )
     
-    # Get model
     model = model_state.get("model")
     if model is None:
+        logger.error("Model not loaded")
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     try:
-        # Decode input image
+        decode_start = time.time()
         image = decode_base64_image(request.image)
         width, height = image.size
+        logger.info(f"Decoded image: {width}x{height} pixels (took {time.time() - decode_start:.2f}s)")
         
-        # Create processor
+        processor_start = time.time()
         processor = Sam3Processor(model, confidence_threshold=request.confidence_threshold)
         inference_state = processor.set_image(image)
+        logger.info(f"Initialized processor (took {time.time() - processor_start:.2f}s)")
         
-        # Apply prompts
+        prompt_start = time.time()
         if request.prompt:
-            # Text prompt
+            logger.info(f"Setting text prompt: '{request.prompt}'")
             inference_state = processor.set_text_prompt(
                 state=inference_state,
                 prompt=request.prompt
             )
         
         if request.boxes:
-            # Visual prompts (bounding boxes)
+            logger.info(f"Setting {len(request.boxes)} box prompt(s)")
             processor.reset_all_prompts(inference_state)
-            for box in request.boxes:
+            for idx, box in enumerate(request.boxes):
                 norm_box = [box.cx, box.cy, box.w, box.h]
+                logger.debug(f"Box {idx}: {norm_box}, label={box.label}")
                 inference_state = processor.add_geometric_prompt(
                     state=inference_state,
                     box=norm_box,
                     label=box.label
                 )
+        logger.info(f"Prompt processing (took {time.time() - prompt_start:.2f}s)")
         
-        # Extract results
+        inference_start = time.time()
         data_list = []
         
-        # Get masks from inference state
-        if hasattr(inference_state, 'masks') and inference_state.masks is not None:
-            masks = inference_state.masks
-            scores = inference_state.scores if hasattr(inference_state, 'scores') else None
+        if isinstance(inference_state, dict) and "masks" in inference_state:
+            masks = inference_state["masks"]
+            scores = inference_state.get("scores")
+            boxes = inference_state.get("boxes")
             
-            # Handle tensor masks
-            if isinstance(masks, torch.Tensor):
-                masks = masks.cpu().numpy()
-            
-            if scores is not None and isinstance(scores, torch.Tensor):
-                scores = scores.cpu().numpy()
-            
-            # Process each mask
-            num_masks = masks.shape[0] if len(masks.shape) > 2 else 1
-            
-            # Limit to requested number of results
-            num_masks = min(num_masks, request.n) if request.n else num_masks
-            
-            for i in range(num_masks):
-                if len(masks.shape) > 2:
-                    mask = masks[i]
-                else:
-                    mask = masks
+            if masks is not None:
+                # Handle tensor masks
+                if isinstance(masks, torch.Tensor):
+                    masks = masks.cpu().float().numpy()
                 
-                # Get score
-                score = float(scores[i]) if scores is not None and len(scores) > i else 0.5
+                if scores is not None and isinstance(scores, torch.Tensor):
+                    scores = scores.cpu().float().numpy()
                 
-                # Calculate bounding box from mask
-                if len(mask.shape) == 3:
-                    mask_2d = mask[0] if mask.shape[0] == 1 else mask.max(axis=0)
-                else:
-                    mask_2d = mask
+                if boxes is not None and isinstance(boxes, torch.Tensor):
+                    boxes = boxes.cpu().float().numpy()
                 
-                # Find bounding box
-                rows = np.any(mask_2d, axis=1)
-                cols = np.any(mask_2d, axis=0)
+                logger.info(f"Masks shape: {masks.shape}")
+                logger.info(f"Scores shape: {scores.shape if scores is not None else 'N/A'}")
                 
-                if rows.any() and cols.any():
-                    y_min, y_max = np.where(rows)[0][[0, -1]]
-                    x_min, x_max = np.where(cols)[0][[0, -1]]
-                    bbox = [float(x_min), float(y_min), float(x_max - x_min), float(y_max - y_min)]
-                else:
-                    bbox = [0.0, 0.0, 0.0, 0.0]
+                num_masks = masks.shape[0] if len(masks.shape) > 2 else 1
                 
-                # Encode mask to base64
-                mask_base64 = encode_mask_to_base64(mask_2d)
+                # Limit to requested number of results
+                num_masks = min(num_masks, request.n) if request.n else num_masks
                 
-                # Create ImageData in OpenAI format
-                data_list.append(
-                    ImageData(
-                        b64_json=mask_base64,
-                        revised_prompt=request.prompt,
-                        score=score,
-                        bbox=bbox
+                for i in range(num_masks):
+                    if len(masks.shape) > 2:
+                        mask = masks[i]
+                    else:
+                        mask = masks
+                    
+                    score = float(scores[i]) if scores is not None and len(scores) > i else 0.5
+                    
+                    if len(mask.shape) == 3:
+                        mask_2d = mask[0] if mask.shape[0] == 1 else mask.max(axis=0)
+                    else:
+                        mask_2d = mask
+                    
+                    rows = np.any(mask_2d, axis=1)
+                    cols = np.any(mask_2d, axis=0)
+                    
+                    if rows.any() and cols.any():
+                        y_min, y_max = np.where(rows)[0][[0, -1]]
+                        x_min, x_max = np.where(cols)[0][[0, -1]]
+                        bbox = [float(x_min), float(y_min), float(x_max - x_min), float(y_max - y_min)]
+                    else:
+                        bbox = [0.0, 0.0, 0.0, 0.0]
+                    
+                    mask_base64 = encode_mask_to_base64(mask_2d)
+                    
+                    data_list.append(
+                        ImageData(
+                            b64_json=mask_base64,
+                            revised_prompt=request.prompt,
+                            score=score,
+                            bbox=bbox
+                        )
                     )
-                )
         
-        # Create response in OpenAI format
+        logger.info(f"Mask extraction complete (took {time.time() - inference_start:.2f}s)")
+        logger.info(f"Generated {len(data_list)} mask(s)")
+        
         response = SAM3Response(
             created=int(time.time()),
             data=data_list
         )
         
+        total_time = time.time() - start_time
+        logger.info(f"✓ Request complete: {len(data_list)} masks in {total_time:.2f}s")
+        
         return response
         
-    except HTTPException:
+    except HTTPException as e:
+        logger.error(f"HTTP Exception: {e.status_code} - {e.detail}")
         raise
     except Exception as e:
+        logger.error(f"Segmentation failed with unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Segmentation failed: {str(e)}")
 
 

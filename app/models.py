@@ -33,10 +33,10 @@ class SAM3Request(BaseModel):
         description="Model to use for segmentation"
     )
     n: Optional[int] = Field(
-        1,
+        None,
         ge=1,
         le=10,
-        description="Number of mask variations to generate"
+        description="Maximum number of masks to return (default: return all)"
     )
     size: Optional[str] = Field(
         "1024x1024",
