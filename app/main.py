@@ -227,7 +227,9 @@ async def segment_image(request: SAM3Request):
         logger.info(f"Decoded image: {width}x{height} pixels (took {time.time() - decode_start:.2f}s)")
         
         processor_start = time.time()
-        processor = Sam3Processor(model, confidence_threshold=request.confidence_threshold)
+        # Get device from model to ensure processor uses the same device (CPU or CUDA)
+        device = next(model.parameters()).device
+        processor = Sam3Processor(model, device=device, confidence_threshold=request.confidence_threshold)
         inference_state = processor.set_image(image)
         logger.info(f"Initialized processor (took {time.time() - processor_start:.2f}s)")
         
