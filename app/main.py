@@ -322,6 +322,18 @@ async def segment_image(request: SAM3Request):
             logger.info(f"Parsed {len(text_prompts)} text prompt(s): {text_prompts}")
         
         # Process text prompts
+        # Note on optimization: We process each prompt sequentially rather than batching them.
+        # This approach ensures:
+        # 1. Each mask is correctly associated with its source prompt
+        # 2. Prompts don't interfere with each other during inference
+        # 3. The image backbone encoding is reused across all prompts (efficient)
+        # 
+        # Alternative batching approach was considered but would require:
+        # - Modifying Sam3Processor to support batched text prompts
+        # - Tracking which masks belong to which prompt in the output
+        # - More complex state management
+        # 
+        # The current approach is optimal given the constraints of the processor API.
         if text_prompts:
             prompt_start = time.time()
             for prompt_text in text_prompts:
