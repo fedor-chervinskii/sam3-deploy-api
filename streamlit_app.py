@@ -40,29 +40,86 @@ def decode_base64_to_image(b64_string: str) -> Image.Image:
     return Image.open(io.BytesIO(img_data))
 
 
-def visualize_masks(original_image: Image.Image, masks_b64: list[str]) -> Image.Image:
-    """Overlay masks on original image with light green fill and yellow border."""
-    # Convert to RGBA for transparency
-    result = original_image.convert("RGBA")
+def get_color_for_prompt(prompt: str, prompt_colors: dict) -> tuple:
+    """Get a consistent color for a given prompt."""
+    if prompt not in prompt_colors:
+        # Predefined color palette for different prompts
+        colors = [
+            (255, 99, 71),    # Tomato red
+            (60, 179, 113),   # Medium sea green
+            (30, 144, 255),   # Dodger blue
+            (255, 165, 0),    # Orange
+            (147, 112, 219),  # Medium purple
+            (255, 215, 0),    # Gold
+            (0, 206, 209),    # Dark turquoise
+            (255, 20, 147),   # Deep pink
+            (50, 205, 50),    # Lime green
+            (138, 43, 226),   # Blue violet
+        ]
+        prompt_colors[prompt] = colors[len(prompt_colors) % len(colors)]
+    return prompt_colors[prompt]
+
+
+def visualize_masks(original_image: Image.Image, masks_data: list[dict]) -> Image.Image:
+    """Overlay masks on original image with different colors per prompt and labels."""
+    from scipy.ndimage import binary_dilation
+    from PIL import ImageFont
     
-    for i, mask_b64 in enumerate(masks_b64):
+    result = original_image.convert("RGBA")
+    draw = ImageDraw.Draw(result)
+    
+    # Track colors for each unique prompt
+    prompt_colors = {}
+    
+    # Try to load a font, fall back to default if not available
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+    except:
+        font = ImageFont.load_default()
+    
+    for i, mask_data in enumerate(masks_data):
+        mask_b64 = mask_data["b64_json"]
+        prompt = mask_data.get("revised_prompt", f"Mask {i+1}")
+        
         # Decode mask
         mask_img = decode_base64_to_image(mask_b64)
         mask_array = np.array(mask_img) > 0
         
-        # Create overlay with light green fill (144, 238, 144 is light green)
-        overlay = np.zeros((*mask_array.shape[:2], 4), dtype=np.uint8)
-        overlay[mask_array] = [144, 238, 144, 100]  # Light green with transparency
+        # Get color for this prompt
+        base_color = get_color_for_prompt(prompt, prompt_colors)
         
-        # Add yellow border (dilate then subtract to get border)
-        from scipy.ndimage import binary_dilation
+        # Create overlay with colored fill
+        overlay = np.zeros((*mask_array.shape[:2], 4), dtype=np.uint8)
+        overlay[mask_array] = [*base_color, 100]  # Semi-transparent fill
+        
+        # Add darker border
         dilated = binary_dilation(mask_array, iterations=2)
         border = dilated & ~mask_array
-        overlay[border] = [255, 255, 0, 200]  # Yellow border, more opaque
+        border_color = tuple(max(0, c - 50) for c in base_color)  # Darker version
+        overlay[border] = [*border_color, 200]  # More opaque border
         
         # Blend with result
         overlay_img = Image.fromarray(overlay, mode="RGBA")
         result = Image.alpha_composite(result, overlay_img)
+        
+        # Find a good position for the label (top-left of mask)
+        if mask_array.any():
+            rows = np.any(mask_array, axis=1)
+            cols = np.any(mask_array, axis=0)
+            y_min = np.where(rows)[0][0]
+            x_min = np.where(cols)[0][0]
+            
+            # Draw label background
+            label_text = prompt if prompt else f"Mask {i+1}"
+            bbox = draw.textbbox((x_min, y_min), label_text, font=font)
+            padding = 4
+            draw.rectangle(
+                [bbox[0] - padding, bbox[1] - padding, 
+                 bbox[2] + padding, bbox[3] + padding],
+                fill=(*base_color, 200)
+            )
+            # Draw label text
+            draw.text((x_min, y_min), label_text, fill=(255, 255, 255, 255), font=font)
     
     return result
 
@@ -198,26 +255,25 @@ if uploaded_file is not None:
                     logger.info("=== Segmentation complete ===")
                 
                 # Extract masks
-                masks = [item["b64_json"] for item in result["data"]]
+                masks_data = result["data"]
                 
-                if masks:
+                if masks_data:
                     # Visualize
                     with col2:
                         st.subheader("Segmentation Result")
-                        visualized = visualize_masks(image, masks)
+                        visualized = visualize_masks(image, masks_data)
                         st.image(visualized, use_container_width=True)
                     
-                    st.success(f"Found {len(masks)} mask(s)")
+                    st.success(f"Found {len(masks_data)} mask(s)")
                     
                     # Show details with prompt information
                     with st.expander("View Details"):
-                        for i, item in enumerate(result["data"]):
+                        for i, item in enumerate(masks_data):
                             st.markdown(f"**Mask {i+1}**")
                             details = {
                                 "score": item.get("score"),
                                 "bbox": item.get("bbox"),
                             }
-                            # Show which prompt generated this mask
                             revised_prompt = item.get("revised_prompt")
                             if revised_prompt:
                                 details["prompt"] = revised_prompt
