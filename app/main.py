@@ -168,8 +168,6 @@ def extract_masks_from_state(state: dict, prompt: str, max_masks: int = None) ->
         state: Inference state dictionary containing masks, scores, and boxes
         prompt: Text prompt associated with these masks (can be None for box prompts)
         max_masks: Maximum number of masks to return (None = return all)
-                   Note: For text prompts, this limits masks per prompt.
-                         For box prompts, pass None to return all detected masks.
         
     Returns:
         List of ImageData objects with associated prompt information
@@ -186,7 +184,6 @@ def extract_masks_from_state(state: dict, prompt: str, max_masks: int = None) ->
     if masks is None:
         return data_list
     
-    # Handle tensor masks
     if isinstance(masks, torch.Tensor):
         masks = masks.cpu().float().numpy()
     
@@ -200,8 +197,6 @@ def extract_masks_from_state(state: dict, prompt: str, max_masks: int = None) ->
     logger.info(f"Scores shape: {scores.shape if scores is not None else 'N/A'}")
     
     num_masks = masks.shape[0] if len(masks.shape) > 2 else 1
-    
-    # Limit to requested number of results
     num_masks = min(num_masks, max_masks) if max_masks else num_masks
     
     for i in range(num_masks):
@@ -316,31 +311,15 @@ async def segment_image(request: SAM3Request):
         
         data_list = []
         
-        # Parse comma-separated prompts if text prompt is provided
         text_prompts = []
         if request.prompt:
-            # Split by comma and strip whitespace from each prompt
             text_prompts = [p.strip() for p in request.prompt.split(',') if p.strip()]
             logger.info(f"Parsed {len(text_prompts)} text prompt(s): {text_prompts}")
         
-        # Process text prompts
-        # Note on optimization: We process each prompt sequentially rather than batching them.
-        # This approach ensures:
-        # 1. Each mask is correctly associated with its source prompt
-        # 2. Prompts don't interfere with each other during inference
-        # 3. The image backbone encoding is reused across all prompts (efficient)
-        # 
-        # Alternative batching approach was considered but would require:
-        # - Modifying Sam3Processor to support batched text prompts
-        # - Tracking which masks belong to which prompt in the output
-        # - More complex state management
-        # 
-        # The current approach is optimal given the constraints of the processor API.
         if text_prompts:
             prompt_start = time.time()
             for prompt_text in text_prompts:
                 logger.info(f"Processing text prompt: '{prompt_text}'")
-                # Reset prompts for each new text prompt to avoid interference
                 processor.reset_all_prompts(inference_state)
                 
                 temp_state = processor.set_text_prompt(
@@ -348,7 +327,6 @@ async def segment_image(request: SAM3Request):
                     prompt=prompt_text
                 )
                 
-                # Extract masks for this prompt (limit per prompt if n is specified)
                 masks_for_prompt = extract_masks_from_state(
                     temp_state, 
                     prompt_text, 
@@ -359,13 +337,9 @@ async def segment_image(request: SAM3Request):
             
             logger.info(f"All text prompts processed (took {time.time() - prompt_start:.2f}s)")
         
-        # Process box prompts
-        # Box prompts can be used alone or combined with text prompts
-        # Note: Box prompts are processed together (not per-box) and return all detected masks
         if request.boxes:
             prompt_start = time.time()
             logger.info(f"Setting {len(request.boxes)} box prompt(s)")
-            # Reset prompts once for all box prompts (they work together)
             processor.reset_all_prompts(inference_state)
             for idx, box in enumerate(request.boxes):
                 norm_box = [box.cx, box.cy, box.w, box.h]
@@ -378,12 +352,10 @@ async def segment_image(request: SAM3Request):
             
             logger.info(f"Prompt processing (took {time.time() - prompt_start:.2f}s)")
             
-            # Extract masks for box prompts
-            # Note: Return all masks from boxes (don't limit with request.n)
             masks_for_boxes = extract_masks_from_state(
                 inference_state, 
-                None,  # No text prompt for boxes
-                None   # Return all masks from box prompts
+                None,
+                None
             )
             data_list.extend(masks_for_boxes)
         
