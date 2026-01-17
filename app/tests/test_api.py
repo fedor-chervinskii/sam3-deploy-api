@@ -186,10 +186,10 @@ class TestMultiplePrompts:
         data = response.json()
         # Check that masks have associated prompts
         for item in data["data"]:
-            assert "revised_prompt" in item
-            # The revised_prompt should be one of the prompts we sent
-            if item["revised_prompt"]:
-                assert item["revised_prompt"] in ["object", "thing"]
+            assert "prompt" in item
+            # The prompt should be one of the prompts we sent
+            if item["prompt"]:
+                assert item["prompt"] in ["object", "thing"]
     
     def test_single_prompt_with_whitespace(self, client: TestClient, test_image_base64: str):
         """Test that single prompt with extra whitespace is handled correctly."""

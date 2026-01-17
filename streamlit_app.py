@@ -81,7 +81,7 @@ def visualize_masks(original_image: Image.Image, masks_data: list[dict]) -> Imag
     
     for i, mask_data in enumerate(masks_data):
         mask_b64 = mask_data["b64_json"]
-        prompt = mask_data.get("revised_prompt", f"Mask {i+1}")
+        prompt = mask_data.get("prompt", f"Mask {i+1}")
         
         # Decode mask
         mask_img = decode_base64_to_image(mask_b64)
@@ -280,9 +280,9 @@ if uploaded_file is not None:
                                 "score": item.get("score"),
                                 "bbox": item.get("bbox"),
                             }
-                            revised_prompt = item.get("revised_prompt")
-                            if revised_prompt:
-                                details["prompt"] = revised_prompt
+                            prompt = item.get("prompt")
+                            if prompt:
+                                details["prompt"] = prompt
                             st.json(details)
                 else:
                     st.warning("No masks found")

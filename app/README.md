@@ -113,7 +113,7 @@ curl -X POST http://localhost:8000/sam3 \
   "data": [
     {
       "b64_json": "<base64-encoded-mask>",
-      "revised_prompt": "person",
+      "prompt": "person",
       "score": 0.95,
       "bbox": [100.0, 200.0, 300.0, 400.0]
     }
@@ -128,7 +128,7 @@ curl -X POST http://localhost:8000/sam3 \
 | `created` | integer | Unix timestamp when masks were created |
 | `data` | array | List of segmentation results |
 | `data[].b64_json` | string | Base64-encoded mask image (PNG) |
-| `data[].revised_prompt` | string | The prompt used for this result |
+| `data[].prompt` | string | The prompt used for this result |
 | `data[].score` | float | Confidence score (0.0-1.0) |
 | `data[].bbox` | array | Bounding box [x, y, width, height] in pixels |
 
@@ -179,12 +179,12 @@ response = requests.post(
 )
 
 result = response.json()
-# Each mask will have a "revised_prompt" field indicating which class it belongs to
+# Each mask will have a "prompt" field indicating which class it belongs to
 for i, item in enumerate(result["data"]):
-    print(f"Mask {i}: prompt='{item['revised_prompt']}', score={item['score']}")
+    print(f"Mask {i}: prompt='{item['prompt']}', score={item['score']}")
     mask_bytes = base64.b64decode(item["b64_json"])
     mask = Image.open(io.BytesIO(mask_bytes))
-    mask.save(f"mask_{i}_{item['revised_prompt']}.png")
+    mask.save(f"mask_{i}_{item['prompt']}.png")
 ```
 
 ### Using Box Prompts

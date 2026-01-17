@@ -224,16 +224,14 @@ def extract_masks_from_state(state: dict, prompt: str, max_masks: int = None) ->
         
         mask_base64 = encode_mask_to_base64(mask_2d)
         
-        data_list.append(
-            ImageData(
-                b64_json=mask_base64,
-                revised_prompt=prompt,
-                score=score,
-                bbox=bbox
-            )
-        )
-    
-    return data_list
+                    data_list.append(
+                        ImageData(
+                            b64_json=mask_base64,
+                            prompt=prompt,
+                            score=score,
+                            bbox=bbox
+                        )
+                    )    return data_list
 
 
 @app.get("/")
