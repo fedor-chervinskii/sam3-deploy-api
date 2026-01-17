@@ -162,7 +162,11 @@ if uploaded_file is not None:
     boxes = None
     
     if prompt_type == "Text":
-        text_prompt = st.text_input("Text Prompt", placeholder="e.g., 'a person', 'the dog'")
+        text_prompt = st.text_input(
+            "Text Prompt", 
+            placeholder="e.g., 'person' or 'car, person' for multiple classes",
+            help="Enter a single class or multiple comma-separated classes"
+        )
     else:
         st.markdown("Enter bounding box coordinates (normalized 0-1):")
         box_col1, box_col2, box_col3, box_col4 = st.columns(4)
@@ -205,15 +209,18 @@ if uploaded_file is not None:
                     
                     st.success(f"Found {len(masks)} mask(s)")
                     
-                    # Show details
+                    # Show details with prompt information
                     with st.expander("View Details"):
                         for i, item in enumerate(result["data"]):
-                            st.json({
-                                "mask_id": i,
+                            st.markdown(f"**Mask {i+1}**")
+                            details = {
                                 "score": item.get("score"),
                                 "bbox": item.get("bbox"),
-                                "revised_prompt": item.get("revised_prompt")
-                            })
+                            }
+                            # Show which prompt generated this mask
+                            if item.get("revised_prompt"):
+                                details["prompt"] = item.get("revised_prompt")
+                            st.json(details)
                 else:
                     st.warning("No masks found")
                     

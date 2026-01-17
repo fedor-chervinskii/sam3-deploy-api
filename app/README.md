@@ -94,7 +94,7 @@ curl -X POST http://localhost:8000/sam3 \
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `image` | string | Yes | Base64-encoded input image (PNG, JPEG, etc.) |
-| `prompt` | string | No* | Text description of what to segment (e.g., "person", "face") |
+| `prompt` | string | No* | Text description of what to segment (e.g., "person", "face"). Supports multiple comma-separated classes (e.g., "car, person, dog") |
 | `boxes` | array | No* | Bounding box prompts in normalized coordinates |
 | `n` | integer | No | Number of results to return (1-10, default: 1) |
 | `size` | string | No | Output size (default: "1024x1024") |
@@ -144,7 +144,7 @@ import io
 with open("image.jpg", "rb") as f:
     image_b64 = base64.b64encode(f.read()).decode()
 
-# Call API
+# Call API with a single prompt
 response = requests.post(
     "http://localhost:8000/sam3",
     json={
@@ -161,6 +161,30 @@ if result["data"]:
     mask_bytes = base64.b64decode(mask_b64)
     mask = Image.open(io.BytesIO(mask_bytes))
     mask.save("output_mask.png")
+```
+
+### Multiple Classes Example
+
+You can segment multiple classes in a single request by providing comma-separated prompts:
+
+```python
+# Call API with multiple comma-separated prompts
+response = requests.post(
+    "http://localhost:8000/sam3",
+    json={
+        "image": image_b64,
+        "prompt": "car, person, dog",  # Multiple classes
+        "confidence_threshold": 0.5
+    }
+)
+
+result = response.json()
+# Each mask will have a "revised_prompt" field indicating which class it belongs to
+for i, item in enumerate(result["data"]):
+    print(f"Mask {i}: prompt='{item['revised_prompt']}', score={item['score']}")
+    mask_bytes = base64.b64decode(item["b64_json"])
+    mask = Image.open(io.BytesIO(mask_bytes))
+    mask.save(f"mask_{i}_{item['revised_prompt']}.png")
 ```
 
 ### Using Box Prompts

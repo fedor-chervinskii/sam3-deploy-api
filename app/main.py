@@ -161,6 +161,84 @@ def encode_mask_to_base64(mask: np.ndarray) -> str:
     return base64_str
 
 
+def extract_masks_from_state(state: dict, prompt: str, max_masks: int = None) -> list:
+    """Extract masks from inference state and convert to ImageData objects.
+    
+    Args:
+        state: Inference state dictionary containing masks, scores, and boxes
+        prompt: Text prompt associated with these masks (can be None)
+        max_masks: Maximum number of masks to return (None = return all)
+        
+    Returns:
+        List of ImageData objects
+    """
+    data_list = []
+    
+    if not isinstance(state, dict) or "masks" not in state:
+        return data_list
+    
+    masks = state["masks"]
+    scores = state.get("scores")
+    boxes = state.get("boxes")
+    
+    if masks is None:
+        return data_list
+    
+    # Handle tensor masks
+    if isinstance(masks, torch.Tensor):
+        masks = masks.cpu().float().numpy()
+    
+    if scores is not None and isinstance(scores, torch.Tensor):
+        scores = scores.cpu().float().numpy()
+    
+    if boxes is not None and isinstance(boxes, torch.Tensor):
+        boxes = boxes.cpu().float().numpy()
+    
+    logger.info(f"Masks shape: {masks.shape}")
+    logger.info(f"Scores shape: {scores.shape if scores is not None else 'N/A'}")
+    
+    num_masks = masks.shape[0] if len(masks.shape) > 2 else 1
+    
+    # Limit to requested number of results
+    num_masks = min(num_masks, max_masks) if max_masks else num_masks
+    
+    for i in range(num_masks):
+        if len(masks.shape) > 2:
+            mask = masks[i]
+        else:
+            mask = masks
+        
+        score = float(scores[i]) if scores is not None and len(scores) > i else 0.5
+        
+        if len(mask.shape) == 3:
+            mask_2d = mask[0] if mask.shape[0] == 1 else mask.max(axis=0)
+        else:
+            mask_2d = mask
+        
+        rows = np.any(mask_2d, axis=1)
+        cols = np.any(mask_2d, axis=0)
+        
+        if rows.any() and cols.any():
+            y_min, y_max = np.where(rows)[0][[0, -1]]
+            x_min, x_max = np.where(cols)[0][[0, -1]]
+            bbox = [float(x_min), float(y_min), float(x_max - x_min), float(y_max - y_min)]
+        else:
+            bbox = [0.0, 0.0, 0.0, 0.0]
+        
+        mask_base64 = encode_mask_to_base64(mask_2d)
+        
+        data_list.append(
+            ImageData(
+                b64_json=mask_base64,
+                revised_prompt=prompt,
+                score=score,
+                bbox=bbox
+            )
+        )
+    
+    return data_list
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
@@ -195,6 +273,7 @@ async def segment_image(request: SAM3Request):
     
     Supports:
     - Text prompts: Describe what to segment (e.g., "person", "face", "shoe")
+    - Multiple comma-separated prompts: "car, person, dog" for multiple classes
     - Visual prompts: Provide bounding boxes as examples
     - Multiple results: Use 'n' parameter to get multiple mask variations
     """
@@ -233,15 +312,42 @@ async def segment_image(request: SAM3Request):
         inference_state = processor.set_image(image)
         logger.info(f"Initialized processor (took {time.time() - processor_start:.2f}s)")
         
-        prompt_start = time.time()
-        if request.prompt:
-            logger.info(f"Setting text prompt: '{request.prompt}'")
-            inference_state = processor.set_text_prompt(
-                state=inference_state,
-                prompt=request.prompt
-            )
+        data_list = []
         
-        if request.boxes:
+        # Parse comma-separated prompts if text prompt is provided
+        text_prompts = []
+        if request.prompt:
+            # Split by comma and strip whitespace from each prompt
+            text_prompts = [p.strip() for p in request.prompt.split(',') if p.strip()]
+            logger.info(f"Parsed {len(text_prompts)} text prompt(s): {text_prompts}")
+        
+        # Process text prompts
+        if text_prompts:
+            prompt_start = time.time()
+            for prompt_text in text_prompts:
+                logger.info(f"Processing text prompt: '{prompt_text}'")
+                # Reset prompts for each new text prompt to avoid interference
+                processor.reset_all_prompts(inference_state)
+                
+                temp_state = processor.set_text_prompt(
+                    state=inference_state,
+                    prompt=prompt_text
+                )
+                
+                # Extract masks for this prompt
+                masks_for_prompt = extract_masks_from_state(
+                    temp_state, 
+                    prompt_text, 
+                    request.n
+                )
+                data_list.extend(masks_for_prompt)
+                logger.info(f"Generated {len(masks_for_prompt)} mask(s) for prompt '{prompt_text}'")
+            
+            logger.info(f"All text prompts processed (took {time.time() - prompt_start:.2f}s)")
+        
+        # Process box prompts (if provided and no text prompts)
+        if request.boxes and not text_prompts:
+            prompt_start = time.time()
             logger.info(f"Setting {len(request.boxes)} box prompt(s)")
             processor.reset_all_prompts(inference_state)
             for idx, box in enumerate(request.boxes):
@@ -252,71 +358,18 @@ async def segment_image(request: SAM3Request):
                     box=norm_box,
                     label=box.label
                 )
-        logger.info(f"Prompt processing (took {time.time() - prompt_start:.2f}s)")
-        
-        inference_start = time.time()
-        data_list = []
-        
-        if isinstance(inference_state, dict) and "masks" in inference_state:
-            masks = inference_state["masks"]
-            scores = inference_state.get("scores")
-            boxes = inference_state.get("boxes")
             
-            if masks is not None:
-                # Handle tensor masks
-                if isinstance(masks, torch.Tensor):
-                    masks = masks.cpu().float().numpy()
-                
-                if scores is not None and isinstance(scores, torch.Tensor):
-                    scores = scores.cpu().float().numpy()
-                
-                if boxes is not None and isinstance(boxes, torch.Tensor):
-                    boxes = boxes.cpu().float().numpy()
-                
-                logger.info(f"Masks shape: {masks.shape}")
-                logger.info(f"Scores shape: {scores.shape if scores is not None else 'N/A'}")
-                
-                num_masks = masks.shape[0] if len(masks.shape) > 2 else 1
-                
-                # Limit to requested number of results
-                num_masks = min(num_masks, request.n) if request.n else num_masks
-                
-                for i in range(num_masks):
-                    if len(masks.shape) > 2:
-                        mask = masks[i]
-                    else:
-                        mask = masks
-                    
-                    score = float(scores[i]) if scores is not None and len(scores) > i else 0.5
-                    
-                    if len(mask.shape) == 3:
-                        mask_2d = mask[0] if mask.shape[0] == 1 else mask.max(axis=0)
-                    else:
-                        mask_2d = mask
-                    
-                    rows = np.any(mask_2d, axis=1)
-                    cols = np.any(mask_2d, axis=0)
-                    
-                    if rows.any() and cols.any():
-                        y_min, y_max = np.where(rows)[0][[0, -1]]
-                        x_min, x_max = np.where(cols)[0][[0, -1]]
-                        bbox = [float(x_min), float(y_min), float(x_max - x_min), float(y_max - y_min)]
-                    else:
-                        bbox = [0.0, 0.0, 0.0, 0.0]
-                    
-                    mask_base64 = encode_mask_to_base64(mask_2d)
-                    
-                    data_list.append(
-                        ImageData(
-                            b64_json=mask_base64,
-                            revised_prompt=request.prompt,
-                            score=score,
-                            bbox=bbox
-                        )
-                    )
+            logger.info(f"Prompt processing (took {time.time() - prompt_start:.2f}s)")
+            
+            # Extract masks for box prompts
+            masks_for_boxes = extract_masks_from_state(
+                inference_state, 
+                None,  # No text prompt for boxes
+                request.n
+            )
+            data_list.extend(masks_for_boxes)
         
-        logger.info(f"Mask extraction complete (took {time.time() - inference_start:.2f}s)")
-        logger.info(f"Generated {len(data_list)} mask(s)")
+        logger.info(f"Generated {len(data_list)} total mask(s)")
         
         response = SAM3Response(
             created=int(time.time()),
