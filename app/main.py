@@ -366,10 +366,6 @@ class BatchProcessor:
         return await response_future
 
 
-# Global batch processor instance
-batch_processor: BatchProcessor = None
-
-
 async def extract_masks_from_state_async(state: dict, prompt: str, max_masks: int = None) -> list:
     """Extract masks from inference state and convert to ImageData objects asynchronously.
     
@@ -446,10 +442,6 @@ async def extract_masks_from_state_async(state: dict, prompt: str, max_masks: in
     data_list = await asyncio.gather(*[process_single_mask(i) for i in range(num_masks)])
     
     return data_list
-
-
-# Global batch processor instance
-batch_processor: BatchProcessor = None
 
 
 @app.get("/")

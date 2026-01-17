@@ -2,85 +2,24 @@
 
 import base64
 import io
-import os
-from typing import Optional
 
 import pytest
-import torch
 from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.main import app as fastapi_app
 
 
-def get_hf_token() -> Optional[str]:
-    """Get HuggingFace token from environment variable."""
-    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-
-
-@pytest.fixture(scope="session")
-def sam3_model():
-    """Load SAM3 model once for all tests.
-    
-    Requires HF_TOKEN environment variable to access the gated SAM3 model.
-    If not available, tests requiring the model will be skipped.
-    """
-    hf_token = get_hf_token()
-    
-    if not hf_token:
-        pytest.skip(
-            "SAM3 model loading skipped: HF_TOKEN not found in environment. "
-            "Set HF_TOKEN environment variable with your HuggingFace token to run model tests. "
-            "Get a token at https://huggingface.co/settings/tokens and request access to facebook/sam3"
-        )
-    
-    # Login to HuggingFace
-    from huggingface_hub import login
-    try:
-        login(token=hf_token, add_to_git_credential=False)
-        print("\nSuccessfully authenticated with HuggingFace")
-    except Exception as e:
-        pytest.skip(f"HuggingFace authentication failed: {e}")
-    
-    # Enable TF32 for Ampere GPUs
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-    
-    # Get BPE path
-    import sam3
-    sam3_root = os.path.dirname(sam3.__file__)
-    bpe_path = f"{sam3_root}/assets/bpe_simple_vocab_16e6.txt.gz"
-    
-    # Load model
-    print("Loading SAM3 model for tests...")
-    try:
-        from sam3 import build_sam3_image_model
-        model = build_sam3_image_model(bpe_path=bpe_path)
-        
-        # Enable autocast for bfloat16
-        if torch.cuda.is_available():
-            torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
-        
-        print("SAM3 model loaded successfully!")
-        return model
-    except Exception as e:
-        pytest.skip(f"Failed to load SAM3 model: {e}")
-
-
-@pytest.fixture(scope="session")
-def app_with_model(sam3_model):
-    """Get FastAPI app with model loaded."""
-    from app.main import model_state
-    model_state["model"] = sam3_model
-    yield fastapi_app
-    model_state.clear()
-
-
 @pytest.fixture
-def client(app_with_model):
-    """Create a test client with model loaded."""
-    return TestClient(app_with_model)
+def client():
+    """Create a test client that properly initializes batch_processor via lifespan.
+    
+    Uses context manager to ensure lifespan events (startup/shutdown) are triggered.
+    Each test gets a fresh client with properly initialized batch_processor and executor.
+    The lifespan will load the model, so no need for app_with_model fixture.
+    """
+    with TestClient(fastapi_app) as test_client:
+        yield test_client
 
 
 @pytest.fixture(scope="session")
