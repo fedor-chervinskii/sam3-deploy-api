@@ -240,3 +240,53 @@ class TestRequestValidation:
             headers={"Content-Type": "application/json"}
         )
         assert response.status_code == 422
+
+
+class TestConcurrency:
+    """Tests for concurrent request handling."""
+    
+    @pytest.mark.asyncio
+    async def test_concurrent_requests(self, sample_text_request: dict):
+        """Test that multiple concurrent requests are handled correctly."""
+        import asyncio
+        import httpx
+        from app.main import app
+        
+        # Use HTTPX async client for true concurrent testing
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test"
+        ) as client:
+            # Send 3 concurrent requests
+            tasks = [
+                client.post("/sam3", json=sample_text_request)
+                for _ in range(3)
+            ]
+            
+            responses = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # All requests should succeed
+            for i, response in enumerate(responses):
+                if isinstance(response, Exception):
+                    pytest.fail(f"Request {i} failed with exception: {response}")
+                
+                assert response.status_code == 200, f"Request {i} failed: {response.text}"
+                data = response.json()
+                assert "created" in data
+                assert "data" in data
+    
+    def test_sequential_requests_still_work(self, client: TestClient, sample_text_request: dict):
+        """Test that sequential requests still work correctly."""
+        # First request
+        response1 = client.post("/sam3", json=sample_text_request)
+        assert response1.status_code == 200
+        
+        # Second request
+        response2 = client.post("/sam3", json=sample_text_request)
+        assert response2.status_code == 200
+        
+        # Both should have valid data
+        data1 = response1.json()
+        data2 = response2.json()
+        assert "data" in data1
+        assert "data" in data2
