@@ -346,7 +346,7 @@ async def segment_image(request: SAM3Request):
                     prompt=prompt_text
                 )
                 
-                # Extract masks for this prompt
+                # Extract masks for this prompt (limit per prompt if n is specified)
                 masks_for_prompt = extract_masks_from_state(
                     temp_state, 
                     prompt_text, 
@@ -357,8 +357,9 @@ async def segment_image(request: SAM3Request):
             
             logger.info(f"All text prompts processed (took {time.time() - prompt_start:.2f}s)")
         
-        # Process box prompts (if provided and no text prompts)
-        if request.boxes and not text_prompts:
+        # Process box prompts
+        # Box prompts can be used alone or combined with text prompts
+        if request.boxes:
             prompt_start = time.time()
             logger.info(f"Setting {len(request.boxes)} box prompt(s)")
             processor.reset_all_prompts(inference_state)
@@ -373,11 +374,11 @@ async def segment_image(request: SAM3Request):
             
             logger.info(f"Prompt processing (took {time.time() - prompt_start:.2f}s)")
             
-            # Extract masks for box prompts
+            # Extract masks for box prompts (return all masks from boxes)
             masks_for_boxes = extract_masks_from_state(
                 inference_state, 
                 None,  # No text prompt for boxes
-                request.n
+                None   # Return all masks from box prompts
             )
             data_list.extend(masks_for_boxes)
         
