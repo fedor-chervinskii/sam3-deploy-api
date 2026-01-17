@@ -229,7 +229,7 @@ async def run_segmentation(model, image: Image.Image, request: SAM3Request) -> l
                 )
                 return temp_state, prompt_text
             
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             temp_state, prompt = await loop.run_in_executor(executor, _process)
             
             # Extract and encode masks asynchronously
@@ -260,7 +260,7 @@ async def run_segmentation(model, image: Image.Image, request: SAM3Request) -> l
                     )
                 return state
             
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             return await loop.run_in_executor(executor, _process)
         
         box_state = await process_box_prompts()
