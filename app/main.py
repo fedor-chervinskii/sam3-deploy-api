@@ -166,11 +166,13 @@ def extract_masks_from_state(state: dict, prompt: str, max_masks: int = None) ->
     
     Args:
         state: Inference state dictionary containing masks, scores, and boxes
-        prompt: Text prompt associated with these masks (can be None)
+        prompt: Text prompt associated with these masks (can be None for box prompts)
         max_masks: Maximum number of masks to return (None = return all)
+                   Note: For text prompts, this limits masks per prompt.
+                         For box prompts, pass None to return all detected masks.
         
     Returns:
-        List of ImageData objects
+        List of ImageData objects with associated prompt information
     """
     data_list = []
     
@@ -359,9 +361,11 @@ async def segment_image(request: SAM3Request):
         
         # Process box prompts
         # Box prompts can be used alone or combined with text prompts
+        # Note: Box prompts are processed together (not per-box) and return all detected masks
         if request.boxes:
             prompt_start = time.time()
             logger.info(f"Setting {len(request.boxes)} box prompt(s)")
+            # Reset prompts once for all box prompts (they work together)
             processor.reset_all_prompts(inference_state)
             for idx, box in enumerate(request.boxes):
                 norm_box = [box.cx, box.cy, box.w, box.h]
@@ -374,7 +378,8 @@ async def segment_image(request: SAM3Request):
             
             logger.info(f"Prompt processing (took {time.time() - prompt_start:.2f}s)")
             
-            # Extract masks for box prompts (return all masks from boxes)
+            # Extract masks for box prompts
+            # Note: Return all masks from boxes (don't limit with request.n)
             masks_for_boxes = extract_masks_from_state(
                 inference_state, 
                 None,  # No text prompt for boxes

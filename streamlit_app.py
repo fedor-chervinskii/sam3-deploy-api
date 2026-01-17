@@ -218,8 +218,9 @@ if uploaded_file is not None:
                                 "bbox": item.get("bbox"),
                             }
                             # Show which prompt generated this mask
-                            if item.get("revised_prompt"):
-                                details["prompt"] = item.get("revised_prompt")
+                            revised_prompt = item.get("revised_prompt")
+                            if revised_prompt:
+                                details["prompt"] = revised_prompt
                             st.json(details)
                 else:
                     st.warning("No masks found")
