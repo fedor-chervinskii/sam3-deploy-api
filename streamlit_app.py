@@ -66,7 +66,6 @@ def visualize_masks(original_image: Image.Image, masks_data: list[dict]) -> Imag
     from PIL import ImageFont
     
     result = original_image.convert("RGBA")
-    draw = ImageDraw.Draw(result)
     
     # Track colors for each unique prompt
     prompt_colors = {}
@@ -76,6 +75,9 @@ def visualize_masks(original_image: Image.Image, masks_data: list[dict]) -> Imag
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
     except:
         font = ImageFont.load_default()
+    
+    # Store label positions to draw them all at the end
+    labels_to_draw = []
     
     for i, mask_data in enumerate(masks_data):
         mask_b64 = mask_data["b64_json"]
@@ -109,17 +111,21 @@ def visualize_masks(original_image: Image.Image, masks_data: list[dict]) -> Imag
             y_min = np.where(rows)[0][0]
             x_min = np.where(cols)[0][0]
             
-            # Draw label background
             label_text = prompt if prompt else f"Mask {i+1}"
-            bbox = draw.textbbox((x_min, y_min), label_text, font=font)
-            padding = 4
-            draw.rectangle(
-                [bbox[0] - padding, bbox[1] - padding, 
-                 bbox[2] + padding, bbox[3] + padding],
-                fill=(*base_color, 200)
-            )
-            # Draw label text
-            draw.text((x_min, y_min), label_text, fill=(255, 255, 255, 255), font=font)
+            labels_to_draw.append((x_min, y_min, label_text, base_color))
+    
+    # Draw all labels on top of all masks
+    draw = ImageDraw.Draw(result)
+    for x_min, y_min, label_text, base_color in labels_to_draw:
+        bbox = draw.textbbox((x_min, y_min), label_text, font=font)
+        padding = 4
+        draw.rectangle(
+            [bbox[0] - padding, bbox[1] - padding, 
+             bbox[2] + padding, bbox[3] + padding],
+            fill=(*base_color, 200)
+        )
+        # Draw label text
+        draw.text((x_min, y_min), label_text, fill=(255, 255, 255, 255), font=font)
     
     return result
 
