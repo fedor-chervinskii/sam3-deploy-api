@@ -32,7 +32,7 @@ async def decode_base64_image(base64_string: str) -> Image.Image:
         image = Image.open(io.BytesIO(image_bytes))
         return image.convert("RGB")
     
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, _decode)
 ```
 
