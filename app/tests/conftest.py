@@ -10,13 +10,12 @@ from PIL import Image
 from app.main import app as fastapi_app
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def client():
     """Create a test client that properly initializes batch_processor via lifespan.
     
-    Uses context manager to ensure lifespan events (startup/shutdown) are triggered.
-    Each test gets a fresh client with properly initialized batch_processor and executor.
-    The lifespan will load the model, so no need for app_with_model fixture.
+    Uses session scope to load the model only once for all tests, improving CI performance.
+    The lifespan will initialize batch_processor, executor, and load the model on first test.
     """
     with TestClient(fastapi_app) as test_client:
         yield test_client
