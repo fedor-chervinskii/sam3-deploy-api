@@ -41,8 +41,6 @@ load_dotenv(dotenv_path=env_path)
 # Global model instance and thread pool executor
 model_state: Dict = {}
 executor: ThreadPoolExecutor = None
-batch_processor = None
-model_lock = asyncio.Lock()
 
 
 def get_bpe_path() -> str:
@@ -95,7 +93,7 @@ def load_model():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for model loading."""
-    global executor, batch_processor
+    global executor
     
     # Startup: load model and initialize executor
     logger.info("Loading SAM3 model...")
@@ -107,15 +105,9 @@ async def lifespan(app: FastAPI):
     executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sam3-worker")
     logger.info("Thread pool executor initialized with 4 workers")
     
-    # Initialize batch processor for efficient GPU utilization
-    batch_processor = BatchProcessor(max_batch_size=4, max_wait_time=0.05)
-    await batch_processor.start()
-    
     yield
     
     # Shutdown: cleanup
-    logger.info("Shutting down batch processor...")
-    await batch_processor.stop()
     logger.info("Shutting down executor...")
     executor.shutdown(wait=True)
     model_state.clear()
@@ -193,177 +185,95 @@ async def encode_mask_to_base64(mask: np.ndarray) -> str:
     return await loop.run_in_executor(executor, _encode)
 
 
-class BatchProcessor:
-    """Batching mechanism for efficient GPU utilization with multiple concurrent requests."""
+async def run_segmentation(model, image: Image.Image, request: SAM3Request) -> list:
+    """Run segmentation with support for multiple prompts asynchronously.
     
-    def __init__(self, max_batch_size: int = 4, max_wait_time: float = 0.05):
-        """
-        Initialize batch processor.
+    Args:
+        model: The SAM3 model
+        image: PIL Image to segment
+        request: SAM3Request with prompts and parameters
         
-        Args:
-            max_batch_size: Maximum number of requests to batch together
-            max_wait_time: Maximum time to wait for batching (in seconds)
-        """
-        self.max_batch_size = max_batch_size
-        self.max_wait_time = max_wait_time
-        self.queue: asyncio.Queue = asyncio.Queue()
-        self.processor_task = None
+    Returns:
+        List of ImageData objects containing masks
+    """
+    # Prepare processor and inference state in thread pool
+    async def prepare_inference_state():
+        def _prepare():
+            device = next(model.parameters()).device
+            processor = Sam3Processor(model, device=device, confidence_threshold=request.confidence_threshold)
+            inference_state = processor.set_image(image)
+            return processor, inference_state
         
-    async def start(self):
-        """Start the batch processor background task."""
-        if self.processor_task is None:
-            self.processor_task = asyncio.create_task(self._process_batches())
-            logger.info(f"Batch processor started (max_batch_size={self.max_batch_size}, max_wait_time={self.max_wait_time}s)")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(executor, _prepare)
     
-    async def stop(self):
-        """Stop the batch processor background task."""
-        if self.processor_task:
-            self.processor_task.cancel()
-            try:
-                await self.processor_task
-            except asyncio.CancelledError:
-                pass
-            logger.info("Batch processor stopped")
+    processor, inference_state = await prepare_inference_state()
     
-    async def _process_batches(self):
-        """Background task that processes batched requests."""
-        while True:
-            try:
-                # Collect batch of requests
-                batch = []
-                deadline = time.time() + self.max_wait_time
-                
-                # Get first request (blocking)
-                try:
-                    first_item = await asyncio.wait_for(
-                        self.queue.get(),
-                        timeout=1.0  # Wake up periodically to check for cancellation
-                    )
-                    batch.append(first_item)
-                except asyncio.TimeoutError:
-                    continue
-                
-                # Try to collect more requests up to max_batch_size or deadline
-                while len(batch) < self.max_batch_size:
-                    timeout = max(0, deadline - time.time())
-                    if timeout <= 0:
-                        break
-                    
-                    try:
-                        item = await asyncio.wait_for(self.queue.get(), timeout=timeout)
-                        batch.append(item)
-                    except asyncio.TimeoutError:
-                        break
-                
-                if len(batch) > 1:
-                    logger.info(f"Processing batch of {len(batch)} requests")
-                
-                # Process batch in parallel
-                await asyncio.gather(*[self._process_single_request(*item) for item in batch])
-                
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in batch processor: {e}")
+    data_list = []
     
-    async def _process_single_request(self, request_data, response_future):
-        """Process a single request from the batch."""
-        try:
-            # Unpack request data
-            model, image, request_obj = request_data
-            
-            # Process the request
-            result = await self._run_segmentation(model, image, request_obj)
-            response_future.set_result(result)
-        except Exception as e:
-            response_future.set_exception(e)
+    # Parse text prompts (support comma-separated multiple prompts)
+    text_prompts = []
+    if request.prompt:
+        text_prompts = [p.strip() for p in request.prompt.split(',') if p.strip()]
     
-    async def _run_segmentation(self, model, image: Image.Image, request: SAM3Request):
-        """Run the actual segmentation with support for multiple prompts."""
-        # Prepare processor and inference state in thread pool
-        async def prepare_inference_state():
-            def _prepare():
-                device = next(model.parameters()).device
-                processor = Sam3Processor(model, device=device, confidence_threshold=request.confidence_threshold)
-                inference_state = processor.set_image(image)
-                return processor, inference_state
-            
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(executor, _prepare)
-        
-        processor, inference_state = await prepare_inference_state()
-        
-        data_list = []
-        
-        # Parse text prompts (support comma-separated multiple prompts)
-        text_prompts = []
-        if request.prompt:
-            text_prompts = [p.strip() for p in request.prompt.split(',') if p.strip()]
-        
-        # Process text prompts asynchronously in parallel
-        if text_prompts:
-            async def process_single_text_prompt(prompt_text):
-                def _process():
-                    temp_state = dict(inference_state)
-                    processor.reset_all_prompts(temp_state)
-                    
-                    temp_state = processor.set_text_prompt(
-                        state=temp_state,
-                        prompt=prompt_text
-                    )
-                    return temp_state, prompt_text
+    # Process text prompts asynchronously in parallel
+    if text_prompts:
+        async def process_single_text_prompt(prompt_text):
+            def _process():
+                temp_state = dict(inference_state)
+                processor.reset_all_prompts(temp_state)
                 
-                loop = asyncio.get_event_loop()
-                temp_state, prompt = await loop.run_in_executor(executor, _process)
-                
-                # Extract and encode masks asynchronously
-                masks_for_prompt = await extract_masks_from_state_async(
-                    temp_state, 
-                    prompt, 
-                    request.n
+                temp_state = processor.set_text_prompt(
+                    state=temp_state,
+                    prompt=prompt_text
                 )
-                return masks_for_prompt
+                return temp_state, prompt_text
             
-            # Process all text prompts concurrently
-            results = await asyncio.gather(*[process_single_text_prompt(p) for p in text_prompts])
-            for masks in results:
-                data_list.extend(masks)
-        
-        # Process box prompts asynchronously
-        if request.boxes:
-            async def process_box_prompts():
-                def _process():
-                    state = dict(inference_state)
-                    processor.reset_all_prompts(state)
-                    for idx, box in enumerate(request.boxes):
-                        norm_box = [box.cx, box.cy, box.w, box.h]
-                        state = processor.add_geometric_prompt(
-                            state=state,
-                            box=norm_box,
-                            label=box.label
-                        )
-                    return state
-                
-                loop = asyncio.get_event_loop()
-                return await loop.run_in_executor(executor, _process)
-            
-            box_state = await process_box_prompts()
+            loop = asyncio.get_event_loop()
+            temp_state, prompt = await loop.run_in_executor(executor, _process)
             
             # Extract and encode masks asynchronously
-            masks_for_boxes = await extract_masks_from_state_async(
-                box_state, 
-                None,
-                None
+            masks_for_prompt = await extract_masks_from_state_async(
+                temp_state, 
+                prompt, 
+                request.n
             )
-            data_list.extend(masks_for_boxes)
+            return masks_for_prompt
         
-        return data_list
+        # Process all text prompts concurrently
+        results = await asyncio.gather(*[process_single_text_prompt(p) for p in text_prompts])
+        for masks in results:
+            data_list.extend(masks)
     
-    async def submit_request(self, model, image: Image.Image, request: SAM3Request):
-        """Submit a request to the batch processor and wait for the result."""
-        response_future = asyncio.Future()
-        await self.queue.put(((model, image, request), response_future))
-        return await response_future
+    # Process box prompts asynchronously
+    if request.boxes:
+        async def process_box_prompts():
+            def _process():
+                state = dict(inference_state)
+                processor.reset_all_prompts(state)
+                for idx, box in enumerate(request.boxes):
+                    norm_box = [box.cx, box.cy, box.w, box.h]
+                    state = processor.add_geometric_prompt(
+                        state=state,
+                        box=norm_box,
+                        label=box.label
+                    )
+                return state
+            
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(executor, _process)
+        
+        box_state = await process_box_prompts()
+        
+        # Extract and encode masks asynchronously
+        masks_for_boxes = await extract_masks_from_state_async(
+            box_state, 
+            None,
+            None
+        )
+        data_list.extend(masks_for_boxes)
+    
+    return data_list
 
 
 async def extract_masks_from_state_async(state: dict, prompt: str, max_masks: int = None) -> list:
@@ -482,8 +392,7 @@ async def segment_image(request: SAM3Request):
     - Visual prompts: Provide bounding boxes as examples
     - Multiple results: Use 'n' parameter to get multiple mask variations
     
-    This endpoint uses request batching for efficient GPU utilization when handling
-    multiple concurrent requests.
+    Processes requests asynchronously for efficient handling of concurrent requests.
     """
     start_time = time.time()
     
@@ -514,9 +423,9 @@ async def segment_image(request: SAM3Request):
         width, height = image.size
         logger.info(f"Decoded image: {width}x{height} pixels (took {time.time() - decode_start:.2f}s)")
         
-        # Submit request to batch processor for efficient GPU utilization
+        # Run segmentation asynchronously
         inference_start = time.time()
-        data_list = await batch_processor.submit_request(model, image, request)
+        data_list = await run_segmentation(model, image, request)
         logger.info(f"Inference complete (took {time.time() - inference_start:.2f}s)")
         logger.info(f"Generated {len(data_list)} mask(s)")
         
