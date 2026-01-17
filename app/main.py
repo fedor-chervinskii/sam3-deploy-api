@@ -1,10 +1,12 @@
 """FastAPI application for serving SAM3 model."""
 
+import asyncio
 import base64
 import io
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Dict
 from pathlib import Path
@@ -36,8 +38,10 @@ env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 
-# Global model instance
+# Global model instance and thread pool executor
 model_state: Dict = {}
+executor: ThreadPoolExecutor = None
+model_lock = asyncio.Lock()
 
 
 def get_bpe_path() -> str:
@@ -90,13 +94,25 @@ def load_model():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for model loading."""
-    # Startup: load model
+    global executor
+    
+    # Startup: load model and initialize executor
     logger.info("Loading SAM3 model...")
     model_state["model"] = load_model()
     logger.info("SAM3 model loaded successfully!")
+    
+    # Initialize thread pool executor for CPU-bound operations
+    # Use 4 workers to handle multiple concurrent requests
+    executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sam3-worker")
+    logger.info("Thread pool executor initialized with 4 workers")
+    
     yield
+    
     # Shutdown: cleanup
+    logger.info("Shutting down executor...")
+    executor.shutdown(wait=True)
     model_state.clear()
+    logger.info("Cleanup complete")
 
 
 # Create FastAPI app
@@ -132,33 +148,42 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-def decode_base64_image(base64_string: str) -> Image.Image:
-    """Decode base64 string to PIL Image."""
-    try:
-        # Remove data URI prefix if present
-        if "," in base64_string:
-            base64_string = base64_string.split(",", 1)[1]
+async def decode_base64_image(base64_string: str) -> Image.Image:
+    """Decode base64 string to PIL Image asynchronously."""
+    def _decode():
+        try:
+            # Remove data URI prefix if present
+            img_str = base64_string
+            if "," in img_str:
+                img_str = img_str.split(",", 1)[1]
+            
+            image_bytes = base64.b64decode(img_str)
+            image = Image.open(io.BytesIO(image_bytes))
+            return image.convert("RGB")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 image: {str(e)}")
+    
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, _decode)
+
+
+async def encode_mask_to_base64(mask: np.ndarray) -> str:
+    """Encode binary mask to base64 PNG string asynchronously."""
+    def _encode():
+        # Convert boolean mask to uint8
+        mask_uint8 = (mask * 255).astype(np.uint8)
         
-        image_bytes = base64.b64decode(base64_string)
-        image = Image.open(io.BytesIO(image_bytes))
-        return image.convert("RGB")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid base64 image: {str(e)}")
-
-
-def encode_mask_to_base64(mask: np.ndarray) -> str:
-    """Encode binary mask to base64 PNG string."""
-    # Convert boolean mask to uint8
-    mask_uint8 = (mask * 255).astype(np.uint8)
+        # Encode as PNG
+        success, buffer = cv2.imencode(".png", mask_uint8)
+        if not success:
+            raise ValueError("Failed to encode mask as PNG")
+        
+        # Convert to base64
+        base64_str = base64.b64encode(buffer.tobytes()).decode("utf-8")
+        return base64_str
     
-    # Encode as PNG
-    success, buffer = cv2.imencode(".png", mask_uint8)
-    if not success:
-        raise ValueError("Failed to encode mask as PNG")
-    
-    # Convert to base64
-    base64_str = base64.b64encode(buffer.tobytes()).decode("utf-8")
-    return base64_str
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, _encode)
 
 
 def extract_masks_from_state(state: dict, prompt: str, max_masks: int = None) -> list:
@@ -236,6 +261,84 @@ def extract_masks_from_state(state: dict, prompt: str, max_masks: int = None) ->
     return data_list
 
 
+async def extract_masks_from_state_async(state: dict, prompt: str, max_masks: int = None) -> list:
+    """Extract masks from inference state and convert to ImageData objects asynchronously.
+    
+    Args:
+        state: Inference state dictionary containing masks, scores, and boxes
+        prompt: Text prompt associated with these masks (can be None for box prompts)
+        max_masks: Maximum number of masks to return (None = return all)
+        
+    Returns:
+        List of ImageData objects with associated prompt information
+    """
+    data_list = []
+    
+    if not isinstance(state, dict) or "masks" not in state:
+        return data_list
+    
+    masks = state["masks"]
+    scores = state.get("scores")
+    boxes = state.get("boxes")
+    
+    if masks is None:
+        return data_list
+    
+    if isinstance(masks, torch.Tensor):
+        masks = masks.cpu().float().numpy()
+    
+    if scores is not None and isinstance(scores, torch.Tensor):
+        scores = scores.cpu().float().numpy()
+    
+    if boxes is not None and isinstance(boxes, torch.Tensor):
+        boxes = boxes.cpu().float().numpy()
+    
+    logger.info(f"Masks shape: {masks.shape}")
+    logger.info(f"Scores shape: {scores.shape if scores is not None else 'N/A'}")
+    
+    num_masks = masks.shape[0] if len(masks.shape) > 2 else 1
+    num_masks = min(num_masks, max_masks) if max_masks else num_masks
+    
+    # Process masks in parallel
+    async def process_single_mask(i):
+        if len(masks.shape) > 2:
+            mask = masks[i]
+        else:
+            mask = masks
+        
+        score = float(scores[i]) if scores is not None and len(scores) > i else 0.5
+        
+        if len(mask.shape) == 3:
+            mask_2d = mask[0] if mask.shape[0] == 1 else mask.max(axis=0)
+        else:
+            mask_2d = mask
+        
+        rows = np.any(mask_2d, axis=1)
+        cols = np.any(mask_2d, axis=0)
+        
+        if rows.any() and cols.any():
+            y_min, y_max = np.where(rows)[0][[0, -1]]
+            x_min, x_max = np.where(cols)[0][[0, -1]]
+            bbox = [float(x_min), float(y_min), float(x_max - x_min), float(y_max - y_min)]
+        else:
+            bbox = [0.0, 0.0, 0.0, 0.0]
+        
+        # Async mask encoding
+        mask_base64 = await encode_mask_to_base64(mask_2d)
+        
+        return ImageData(
+            b64_json=mask_base64,
+            prompt=prompt,
+            score=score,
+            bbox=bbox
+        )
+    
+    # Process all masks concurrently
+    data_list = await asyncio.gather(*[process_single_mask(i) for i in range(num_masks)])
+    
+    return data_list
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
@@ -298,62 +401,96 @@ async def segment_image(request: SAM3Request):
     
     try:
         decode_start = time.time()
-        image = decode_base64_image(request.image)
+        # Async image decoding
+        image = await decode_base64_image(request.image)
         width, height = image.size
         logger.info(f"Decoded image: {width}x{height} pixels (took {time.time() - decode_start:.2f}s)")
         
         processor_start = time.time()
-        # Get device from model to ensure processor uses the same device (CPU or CUDA)
-        device = next(model.parameters()).device
-        processor = Sam3Processor(model, device=device, confidence_threshold=request.confidence_threshold)
-        inference_state = processor.set_image(image)
+        
+        # Prepare processor and inference state in thread pool
+        async def prepare_inference_state():
+            def _prepare():
+                # Get device from model to ensure processor uses the same device (CPU or CUDA)
+                device = next(model.parameters()).device
+                processor = Sam3Processor(model, device=device, confidence_threshold=request.confidence_threshold)
+                inference_state = processor.set_image(image)
+                return processor, inference_state
+            
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(executor, _prepare)
+        
+        processor, inference_state = await prepare_inference_state()
         logger.info(f"Initialized processor (took {time.time() - processor_start:.2f}s)")
         
+        prompt_start = time.time()
         data_list = []
         
+        # Parse text prompts (support comma-separated multiple prompts)
         text_prompts = []
         if request.prompt:
             text_prompts = [p.strip() for p in request.prompt.split(',') if p.strip()]
             logger.info(f"Parsed {len(text_prompts)} text prompt(s): {text_prompts}")
         
+        # Process text prompts asynchronously in parallel
         if text_prompts:
-            prompt_start = time.time()
-            for prompt_text in text_prompts:
-                logger.info(f"Processing text prompt: '{prompt_text}'")
-                processor.reset_all_prompts(inference_state)
+            async def process_single_text_prompt(prompt_text):
+                def _process():
+                    logger.info(f"Processing text prompt: '{prompt_text}'")
+                    temp_state = dict(inference_state)
+                    processor.reset_all_prompts(temp_state)
+                    
+                    temp_state = processor.set_text_prompt(
+                        state=temp_state,
+                        prompt=prompt_text
+                    )
+                    return temp_state, prompt_text
                 
-                temp_state = processor.set_text_prompt(
-                    state=inference_state,
-                    prompt=prompt_text
-                )
+                loop = asyncio.get_event_loop()
+                temp_state, prompt = await loop.run_in_executor(executor, _process)
                 
-                masks_for_prompt = extract_masks_from_state(
+                # Extract and encode masks asynchronously
+                masks_for_prompt = await extract_masks_from_state_async(
                     temp_state, 
-                    prompt_text, 
+                    prompt, 
                     request.n
                 )
-                data_list.extend(masks_for_prompt)
-                logger.info(f"Generated {len(masks_for_prompt)} mask(s) for prompt '{prompt_text}'")
+                logger.info(f"Generated {len(masks_for_prompt)} mask(s) for prompt '{prompt}'")
+                return masks_for_prompt
+            
+            # Process all text prompts concurrently
+            results = await asyncio.gather(*[process_single_text_prompt(p) for p in text_prompts])
+            for masks in results:
+                data_list.extend(masks)
             
             logger.info(f"All text prompts processed (took {time.time() - prompt_start:.2f}s)")
         
+        # Process box prompts asynchronously
         if request.boxes:
-            prompt_start = time.time()
-            logger.info(f"Setting {len(request.boxes)} box prompt(s)")
-            processor.reset_all_prompts(inference_state)
-            for idx, box in enumerate(request.boxes):
-                norm_box = [box.cx, box.cy, box.w, box.h]
-                logger.debug(f"Box {idx}: {norm_box}, label={box.label}")
-                inference_state = processor.add_geometric_prompt(
-                    state=inference_state,
-                    box=norm_box,
-                    label=box.label
-                )
+            async def process_box_prompts():
+                def _process():
+                    logger.info(f"Setting {len(request.boxes)} box prompt(s)")
+                    state = dict(inference_state)
+                    processor.reset_all_prompts(state)
+                    for idx, box in enumerate(request.boxes):
+                        norm_box = [box.cx, box.cy, box.w, box.h]
+                        logger.debug(f"Box {idx}: {norm_box}, label={box.label}")
+                        state = processor.add_geometric_prompt(
+                            state=state,
+                            box=norm_box,
+                            label=box.label
+                        )
+                    return state
+                
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(executor, _process)
             
-            logger.info(f"Prompt processing (took {time.time() - prompt_start:.2f}s)")
+            box_state = await process_box_prompts()
+            logger.info(f"Box prompts processing (took {time.time() - prompt_start:.2f}s)")
             
-            masks_for_boxes = extract_masks_from_state(
-                inference_state, 
+            # Extract and encode masks asynchronously
+            masks_for_boxes = await extract_masks_from_state_async(
+                box_state, 
                 None,
                 None
             )
