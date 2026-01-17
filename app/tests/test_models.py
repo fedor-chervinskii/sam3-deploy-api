@@ -144,14 +144,14 @@ class TestImageData:
         assert result.score is None
         assert result.bbox is None
     
-    def test_with_revised_prompt(self):
-        """Test ImageData with revised_prompt."""
+    def test_with_prompt(self):
+        """Test ImageData with prompt."""
         result = ImageData(
-            b64_json="base64mask",
-            revised_prompt="person in red shirt",
-            score=0.9
+            b64_json="base64_encoded_mask",
+            prompt="person in red shirt",
+            score=0.95
         )
-        assert result.revised_prompt == "person in red shirt"
+        assert result.prompt == "person in red shirt"
 
 
 class TestSAM3Response:

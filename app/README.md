@@ -94,7 +94,7 @@ curl -X POST http://localhost:8000/sam3 \
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `image` | string | Yes | Base64-encoded input image (PNG, JPEG, etc.) |
-| `prompt` | string | No* | Text description of what to segment (e.g., "person", "face") |
+| `prompt` | string | No* | Text description of what to segment (e.g., "person", "face"). Supports multiple comma-separated classes (e.g., "car, person, dog") |
 | `boxes` | array | No* | Bounding box prompts in normalized coordinates |
 | `n` | integer | No | Number of results to return (1-10, default: 1) |
 | `size` | string | No | Output size (default: "1024x1024") |
@@ -113,7 +113,7 @@ curl -X POST http://localhost:8000/sam3 \
   "data": [
     {
       "b64_json": "<base64-encoded-mask>",
-      "revised_prompt": "person",
+      "prompt": "person",
       "score": 0.95,
       "bbox": [100.0, 200.0, 300.0, 400.0]
     }
@@ -128,7 +128,7 @@ curl -X POST http://localhost:8000/sam3 \
 | `created` | integer | Unix timestamp when masks were created |
 | `data` | array | List of segmentation results |
 | `data[].b64_json` | string | Base64-encoded mask image (PNG) |
-| `data[].revised_prompt` | string | The prompt used for this result |
+| `data[].prompt` | string | The prompt used for this result |
 | `data[].score` | float | Confidence score (0.0-1.0) |
 | `data[].bbox` | array | Bounding box [x, y, width, height] in pixels |
 
@@ -144,7 +144,7 @@ import io
 with open("image.jpg", "rb") as f:
     image_b64 = base64.b64encode(f.read()).decode()
 
-# Call API
+# Call API with a single prompt
 response = requests.post(
     "http://localhost:8000/sam3",
     json={
@@ -161,6 +161,30 @@ if result["data"]:
     mask_bytes = base64.b64decode(mask_b64)
     mask = Image.open(io.BytesIO(mask_bytes))
     mask.save("output_mask.png")
+```
+
+### Multiple Classes Example
+
+You can segment multiple classes in a single request by providing comma-separated prompts:
+
+```python
+# Call API with multiple comma-separated prompts
+response = requests.post(
+    "http://localhost:8000/sam3",
+    json={
+        "image": image_b64,
+        "prompt": "car, person, dog",  # Multiple classes
+        "confidence_threshold": 0.5
+    }
+)
+
+result = response.json()
+# Each mask will have a "prompt" field indicating which class it belongs to
+for i, item in enumerate(result["data"]):
+    print(f"Mask {i}: prompt='{item['prompt']}', score={item['score']}")
+    mask_bytes = base64.b64decode(item["b64_json"])
+    mask = Image.open(io.BytesIO(mask_bytes))
+    mask.save(f"mask_{i}_{item['prompt']}.png")
 ```
 
 ### Using Box Prompts

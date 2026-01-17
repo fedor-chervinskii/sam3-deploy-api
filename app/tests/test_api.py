@@ -154,6 +154,66 @@ class TestSAM3Endpoint:
                 pytest.fail("b64_json is not valid base64")
 
 
+class TestMultiplePrompts:
+    """Tests for multiple comma-separated prompt support."""
+    
+    def test_sam3_endpoint_with_comma_separated_prompts(self, client: TestClient, test_image_base64: str):
+        """Test SAM3 endpoint with multiple comma-separated prompts."""
+        request = {
+            "image": test_image_base64,
+            "prompt": "object, thing, item",
+            "confidence_threshold": 0.3
+        }
+        response = client.post("/sam3", json=request)
+        
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+        
+        data = response.json()
+        assert "data" in data
+        assert isinstance(data["data"], list)
+    
+    def test_multiple_prompts_have_associated_prompt(self, client: TestClient, test_image_base64: str):
+        """Test that each mask from multiple prompts has its prompt recorded."""
+        request = {
+            "image": test_image_base64,
+            "prompt": "object, thing",
+            "confidence_threshold": 0.3
+        }
+        response = client.post("/sam3", json=request)
+        
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+        
+        data = response.json()
+        # Check that masks have associated prompts
+        for item in data["data"]:
+            assert "prompt" in item
+            # The prompt should be one of the prompts we sent
+            if item["prompt"]:
+                assert item["prompt"] in ["object", "thing"]
+    
+    def test_single_prompt_with_whitespace(self, client: TestClient, test_image_base64: str):
+        """Test that single prompt with extra whitespace is handled correctly."""
+        request = {
+            "image": test_image_base64,
+            "prompt": "  object  ",
+            "confidence_threshold": 0.3
+        }
+        response = client.post("/sam3", json=request)
+        
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+    
+    def test_prompt_with_spaces_and_commas(self, client: TestClient, test_image_base64: str):
+        """Test prompts with spaces around commas are parsed correctly."""
+        request = {
+            "image": test_image_base64,
+            "prompt": "object , thing , item",
+            "confidence_threshold": 0.3
+        }
+        response = client.post("/sam3", json=request)
+        
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+
+
 class TestRequestValidation:
     """Tests for request validation."""
     

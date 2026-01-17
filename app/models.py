@@ -77,7 +77,7 @@ class SAM3Request(BaseModel):
 class ImageData(BaseModel):
     """Single image data result (OpenAI-compatible format)."""
     b64_json: str = Field(..., description="Base64-encoded segmentation mask (PNG)")
-    revised_prompt: Optional[str] = Field(None, description="The prompt used for this result")
+    prompt: Optional[str] = Field(None, description="The prompt used for this result")
     
     # SAM3-specific fields
     score: Optional[float] = Field(None, description="Confidence score for this mask (SAM3-specific)")
