@@ -28,7 +28,7 @@ The API will be available at `http://localhost:8000`
 
 ## Streamlit Demo App
 
-![Streamlit Demo](./assets/images/groceries_demo.jpg)
+![Streamlit Demo](./assets/images/test_image_demo.jpg)
 
 ```bash
 # In a separate terminal, start the Streamlit app
