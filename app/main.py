@@ -41,6 +41,7 @@ load_dotenv(dotenv_path=env_path)
 # Global model instance and thread pool executor
 model_state: Dict = {}
 executor: ThreadPoolExecutor = None
+batch_processor = None
 model_lock = asyncio.Lock()
 
 
@@ -169,7 +170,7 @@ async def decode_base64_image(base64_string: str) -> Image.Image:
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid base64 image: {str(e)}")
     
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, _decode)
 
 
@@ -188,7 +189,7 @@ async def encode_mask_to_base64(mask: np.ndarray) -> str:
         base64_str = base64.b64encode(buffer.tobytes()).decode("utf-8")
         return base64_str
     
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, _encode)
 
 
@@ -287,7 +288,7 @@ class BatchProcessor:
                 inference_state = processor.set_image(image)
                 return processor, inference_state
             
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             return await loop.run_in_executor(executor, _prepare)
         
         processor, inference_state = await prepare_inference_state()
